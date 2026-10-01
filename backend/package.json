@@ -1,0 +1,53 @@
+{
+  "name": "motora-backend",
+  "prisma": {
+    "seed": "ts-node --transpile-only prisma/seed.ts"
+  },
+  "version": "0.1.0",
+  "private": true,
+  "description": "MOTORA Garage platform backend (NestJS modular monolith)",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/main.js",
+    "start:dev": "ts-node --transpile-only src/main.ts",
+    "seed": "ts-node --transpile-only prisma/seed.ts",
+    "test": "jest",
+    "test:e2e": "jest --config test/jest-e2e.json",
+    "test:cov": "jest --coverage"
+  },
+  "dependencies": {
+    "@nestjs/common": "^10.4.4",
+    "@nestjs/config": "^3.2.3",
+    "@nestjs/core": "^10.4.4",
+    "@nestjs/jwt": "^10.2.0",
+    "@nestjs/platform-express": "^10.4.4",
+    "@nestjs/swagger": "^7.4.2",
+    "@nestjs/terminus": "^10.2.3",
+    "@node-rs/argon2": "^2.2.1",
+    "@prisma/client": "^6.19.3",
+    "compression": "^1.7.4",
+    "cookie-parser": "^1.4.7",
+    "helmet": "^7.1.0",
+    "pino": "^9.4.0",
+    "prisma": "^6.19.3",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@nestjs/testing": "^10.4.4",
+    "@types/compression": "^1.7.5",
+    "@types/cookie-parser": "^1.4.7",
+    "@types/express": "^4.17.21",
+    "@types/jest": "^29.5.13",
+    "@types/node": "^22.7.4",
+    "@types/supertest": "^6.0.2",
+    "jest": "^29.7.0",
+    "pino-pretty": "^11.2.2",
+    "supertest": "^7.0.0",
+    "ts-jest": "^29.2.5",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.19.1",
+    "typescript": "^5.5.4"
+  }
+}

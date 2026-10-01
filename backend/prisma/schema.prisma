@@ -1,0 +1,1561 @@
+// MOTORA — Phase 2 schema (per docs/database.md)
+// Scope: tenant core, users, customer profiles, vehicles, services,
+// and the public content tables the existing frontend reads
+// (testimonials, gallery items). Auth/booking/financial tables follow
+// in Phases 3–7 as separate migrations — never hand-edit applied SQL.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------- Enums (Phase 2 scope) ----------------
+
+enum GarageStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+enum UserRole {
+  CUSTOMER
+  MECHANIC
+  /// Wash-bay technician (Phase 6) — rank-equal to MECHANIC, own machine.
+  WASHER
+  SERVICE_ADVISOR
+  INVENTORY_MANAGER
+  CASHIER
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum UserStatus {
+  PENDING_VERIFICATION
+  ACTIVE
+  SUSPENDED
+  LOCKED
+}
+
+enum FuelType {
+  PETROL
+  DIESEL
+  HYBRID
+  ELECTRIC
+}
+
+enum Transmission {
+  MANUAL
+  AUTOMATIC
+}
+
+enum ServiceCategory {
+  // Shown on marketing surfaces (service cards)
+  CORE
+  // Shown in the extras row (wheels, breakdown, fleet)
+  EXTRA
+  // Bookable catalog entries not shown on marketing surfaces
+  // (e.g. "General Service", "Not sure — please diagnose")
+  BOOKING_ONLY
+  // Wash packages (Phase 6): spawn type=WASH work orders + wash_jobs rows
+  WASH
+}
+
+enum GalleryTag {
+  ENGINE
+  BRAKES
+  SUSPENSION
+  DIAGNOSTICS
+  AC_COOLING
+  ELECTRICAL
+  OTHER
+}
+
+enum TestimonialSource {
+  GOOGLE
+  WALKIN
+  FORM
+  MANUAL
+}
+
+// ---------------- Tenant core ----------------
+
+model Garage {
+  id             String       @id @default(uuid()) @db.Uuid
+  name           String
+  slug           String       @unique
+  phone          String
+  whatsappNumber String?      @map("whatsapp_number")
+  email          String
+  address        String
+  city           String
+  /// Neighborhood/area for display (e.g. "Kilimani") — mapped from the
+  /// frontend's original site.location.area so the UI needs no restructure.
+  area           String?
+  county         String
+  country        String       @default("Kenya")
+  latitude       Decimal?     @map("latitude") @db.Decimal(10, 8)
+  longitude      Decimal?     @map("longitude") @db.Decimal(11, 8)
+  timezone       String       @default("Africa/Nairobi")
+  currency       String       @default("KES")
+  brandsServiced String[]     @map("brands_serviced")
+  /// Marketing stats only — never authoritative business data.
+  stats          Json?
+  socials        Json?
+  status         GarageStatus @default(ACTIVE)
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+
+  hours        GarageHour[]
+  users        User[]
+  services     Service[]
+  vehicles     Vehicle[]
+  testimonials Testimonial[]
+  galleryItems GalleryItem[]
+  bookings     Booking[]
+  inspectionTemplates InspectionTemplate[]
+  mediaFiles   MediaFile[]
+  workOrders   WorkOrder[]
+  parts        Part[]
+  inventoryTransactions InventoryTransaction[]
+  partRequests PartRequest[]
+  qualityChecks QualityCheck[]
+  invoices     Invoice[]
+  payments     Payment[]
+  washJobs     WashJob[]
+  notifications   Notification[]
+  customerUpdates CustomerUpdate[]
+  serviceReminders ServiceReminder[]
+
+  @@index([status])
+  @@map("garages")
+}
+
+model GarageHour {
+  id        String    @id @default(uuid()) @db.Uuid
+  garageId  String    @map("garage_id") @db.Uuid
+  dayOfWeek Int       @map("day_of_week") // 0=Sunday … 6=Saturday
+  opensAt   DateTime? @map("opens_at") @db.Time
+  closesAt  DateTime? @map("closes_at") @db.Time
+  isClosed  Boolean   @default(false) @map("is_closed")
+
+  garage Garage @relation(fields: [garageId], references: [id], onDelete: Cascade)
+
+  @@unique([garageId, dayOfWeek])
+  @@index([garageId])
+  @@map("garage_hours")
+}
+
+// ---------------- Identity ----------------
+
+model User {
+  id               String     @id @default(uuid()) @db.Uuid
+  garageId         String     @map("garage_id") @db.Uuid
+  phone            String     @unique @db.VarChar(20) // normalized E.164 (+2547XXXXXXXX)
+  email            String?    @unique @db.VarChar(255)
+  /// Nullable from Phase 4: guest quote-requests create users without
+  /// passwords (account upgrade sets it in Phase 3 auth).
+  passwordHash     String?    @map("password_hash")
+  firstName        String     @map("first_name") @db.VarChar(80)
+  lastName         String     @map("last_name") @db.VarChar(80)
+  role             UserRole   @default(CUSTOMER)
+  status           UserStatus @default(PENDING_VERIFICATION)
+  emailVerifiedAt  DateTime?  @map("email_verified_at")
+  phoneVerifiedAt  DateTime?  @map("phone_verified_at")
+  lastLoginAt      DateTime?  @map("last_login_at")
+  failedLoginCount Int        @default(0) @map("failed_login_count")
+  lockedUntil      DateTime?  @map("locked_until")
+  mfaEnforced      Boolean    @default(false) @map("mfa_enforced")
+  createdAt        DateTime   @default(now()) @map("created_at")
+  updatedAt        DateTime   @updatedAt @map("updated_at")
+  deletedAt        DateTime?  @map("deleted_at")
+
+  garage           Garage           @relation(fields: [garageId], references: [id])
+  customerProfile  CustomerProfile?
+  vehicles         Vehicle[]
+  bookings         Booking[]
+  refreshSessions  RefreshSession[]
+  mfaFactors       MfaFactor[]
+  workOrdersAsCustomer WorkOrder[] @relation("WorkOrderCustomer")
+  workOrdersAsTech     WorkOrder[] @relation("WorkOrderTechnician")
+  inspectionsConducted InspectionRun[] @relation("InspectionConductor")
+  estimatesSent        Estimate[]  @relation("EstimateSender")
+  partsRequested       PartRequest[] @relation("PartRequester")
+  partRequestsDecided  PartRequest[] @relation("PartRequestDecider")
+  inventoryTxPerformed InventoryTransaction[] @relation("InventoryTxPerformer")
+  invoicesIssued       Invoice[]     @relation("InvoiceIssuer")
+  invoicesVoided       Invoice[]     @relation("InvoiceVoider")
+  invoicesAsCustomer   Invoice[]     @relation("InvoiceCustomer")
+  paymentsAsCustomer   Payment[]     @relation("PaymentCustomer")
+  qualityChecksDone    QualityCheck[] @relation("QualityChecker")
+  washJobsAsWasher     WashJob[]     @relation("WashJobWasher")
+  notifications           Notification[]
+  customerUpdatesSent     CustomerUpdate[]  @relation("CustomerUpdateSender")
+  customerUpdateTargets   CustomerUpdate[]  @relation("CustomerUpdateTargetCustomer")
+  remindersCreated        ServiceReminder[] @relation("ServiceReminderCreator")
+  remindersSent           ServiceReminder[] @relation("ServiceReminderSender")
+
+  @@index([garageId, role])
+  @@index([status])
+  @@map("users")
+}
+
+model CustomerProfile {
+  id             String   @id @default(uuid()) @db.Uuid
+  userId         String   @unique @map("user_id") @db.Uuid
+  garageId       String   @map("garage_id") @db.Uuid
+  address        String?
+  city           String?
+  /// Staff-only operational notes. Never exposed to the customer.
+  notes          String?
+  /// Kept for Phase 3 consent work; marketing consents get a full
+  /// append-only consents table — do not infer policy from this flag.
+  marketingOptIn Boolean  @default(false) @map("marketing_opt_in")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([garageId])
+  @@map("customer_profiles")
+}
+
+// ---------------- Vehicles ----------------
+
+model Vehicle {
+  id                 String        @id @default(uuid()) @db.Uuid
+  garageId           String        @map("garage_id") @db.Uuid
+  customerId         String        @map("customer_id") @db.Uuid
+  /// Normalized form: uppercase alphanumeric, e.g. "KDA123A" (display adds the space).
+  registrationNumber String        @map("registration_number") @db.VarChar(12)
+  make               String        @db.VarChar(40)
+  model              String        @db.VarChar(60)
+  year               Int?
+  vin                String?       @db.VarChar(17)
+  engineNumber       String?       @map("engine_number")
+  fuelType           FuelType?     @map("fuel_type")
+  transmission       Transmission?
+  mileage            Int?
+  notes              String?
+  createdAt          DateTime      @default(now()) @map("created_at")
+  updatedAt          DateTime      @updatedAt @map("updated_at")
+  deletedAt          DateTime?     @map("deleted_at")
+
+  garage     Garage      @relation(fields: [garageId], references: [id])
+  customer   User        @relation(fields: [customerId], references: [id])
+  workOrders WorkOrder[]
+  serviceReminders      ServiceReminder[]
+  customerUpdateTargets CustomerUpdate[]
+
+  @@unique([garageId, registrationNumber, customerId])
+  @@index([registrationNumber])
+  @@index([customerId])
+  @@index([garageId])
+  @@map("vehicles")
+}
+
+// ---------------- Service catalog ----------------
+
+model Service {
+  id                       String          @id @default(uuid()) @db.Uuid
+  garageId                 String          @map("garage_id") @db.Uuid
+  name                     String          @db.VarChar(120)
+  slug                     String          @db.VarChar(140)
+  description              String?
+  /// Key into the frontend icon set (Icons.jsx) — presentation only.
+  iconKey                  String?         @map("icon_key")
+  /// "01", "02" … preserves the current UI card numbering.
+  displayNum               String?         @map("display_num") @db.VarChar(4)
+  /// Frontend bullet points (display-only marketing copy).
+  points                   String[]
+  category                 ServiceCategory @default(CORE)
+  estimatedDurationMinutes Int?            @map("estimated_duration_minutes")
+  /// Integer minor units (KES cents). Never floats.
+  basePrice                Int?            @map("base_price")
+  currency                 String          @default("KES") @db.VarChar(3)
+  isActive                 Boolean         @default(true) @map("is_active")
+  displayOrder             Int             @default(0) @map("display_order")
+  createdAt                DateTime        @default(now()) @map("created_at")
+  updatedAt                DateTime        @updatedAt @map("updated_at")
+
+  garage   Garage    @relation(fields: [garageId], references: [id])
+  bookings Booking[]
+  washJobs WashJob[]
+
+  @@unique([garageId, slug])
+  @@index([garageId, isActive])
+  @@map("services")
+}
+
+// ---------------- Public content (read by current frontend) ----------------
+
+model Testimonial {
+  id           String            @id @default(uuid()) @db.Uuid
+  garageId     String            @map("garage_id") @db.Uuid
+  authorName   String            @map("author_name") @db.VarChar(120)
+  authorArea   String?           @map("author_area") @db.VarChar(120)
+  vehicle      String?           @db.VarChar(120)
+  rating       Int
+  quote        String            @db.Text
+  isApproved   Boolean           @default(false) @map("is_approved")
+  isFeatured   Boolean           @default(false) @map("is_featured")
+  displayOrder Int               @default(0) @map("display_order")
+  source       TestimonialSource @default(MANUAL)
+  createdAt    DateTime          @default(now()) @map("created_at")
+  updatedAt    DateTime          @updatedAt @map("updated_at")
+
+  garage Garage @relation(fields: [garageId], references: [id])
+
+  @@index([garageId, isApproved])
+  @@map("testimonials")
+}
+
+model GalleryItem {
+  id           String     @id @default(uuid()) @db.Uuid
+  garageId     String     @map("garage_id") @db.Uuid
+  title        String     @db.VarChar(160)
+  vehicleLabel String?    @map("vehicle_label") @db.VarChar(120)
+  tag          GalleryTag @default(OTHER)
+  /// Public marketing image URL (CDN/external). Private customer media
+  /// lives in media_files + object storage (Phase 9) — never here.
+  externalUrl  String?    @map("external_url") @db.Text
+  videoUrl     String?    @map("video_url") @db.Text
+  isPublished  Boolean    @default(true) @map("is_published")
+  displayOrder Int        @default(0) @map("display_order")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+
+  garage Garage @relation(fields: [garageId], references: [id])
+
+  @@index([garageId, isPublished])
+  @@index([tag])
+  @@map("gallery_items")
+}
+
+// ---------------- Bookings (Phase 4 — guest quote requests) ----------------
+
+enum BookingStatus {
+  REQUESTED
+  CONFIRMED
+  CHECKED_IN
+  INSPECTION
+  AWAITING_APPROVAL
+  APPROVED
+  IN_PROGRESS
+  READY_FOR_COLLECTION
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+/// Who/what triggered a status change (audit clarity).
+enum StatusActor {
+  CUSTOMER
+  STAFF
+  SYSTEM
+}
+
+model Booking {
+  id                   String        @id @default(uuid()) @db.Uuid
+  garageId             String        @map("garage_id") @db.Uuid
+  customerId           String        @map("customer_id") @db.Uuid
+  /// Null for guest quote-requests (vehicle captured as free text).
+  vehicleId            String?       @map("vehicle_id") @db.Uuid
+  /// Raw "Toyota Fielder 2016" style text from the current form (M1 bridge).
+  vehicleText          String?       @map("vehicle_text") @db.VarChar(120)
+  /// Human-friendly reference, e.g. MOT-2026-000123 (unique per database).
+  bookingNumber        String        @unique @map("booking_number") @db.VarChar(24)
+  scheduledDate        DateTime?     @map("scheduled_date") @db.Date
+  scheduledTime        DateTime?     @map("scheduled_time") @db.Time
+  status               BookingStatus @default(REQUESTED)
+  /// The service name the customer picked (M2 bridge until FK flow lands).
+  requestedServiceName String?       @map("requested_service_name") @db.VarChar(140)
+  /// The catalog service resolved from the requested name, if any.
+  serviceId            String?       @map("service_id") @db.Uuid
+  customerNotes        String?       @map("customer_notes") @db.Text
+  /// Staff-only operational notes (never exposed to customers).
+  internalNotes        String?       @map("internal_notes") @db.Text
+  estimatedCost        Int?          @map("estimated_cost")
+  approvedCost         Int?          @map("approved_cost")
+  actualCost           Int?          @map("actual_cost")
+  cancelledAt          DateTime?     @map("cancelled_at")
+  completedAt          DateTime?     @map("completed_at")
+  createdAt            DateTime      @default(now()) @map("created_at")
+  updatedAt            DateTime      @updatedAt @map("updated_at")
+
+  garage        Garage                 @relation(fields: [garageId], references: [id])
+  customer      User                   @relation(fields: [customerId], references: [id])
+  service       Service?               @relation(fields: [serviceId], references: [id])
+  statusHistory BookingStatusHistory[]
+  workOrder     WorkOrder?
+  invoices      Invoice[]
+  notifications Notification[]
+
+  @@index([customerId])
+  @@index([garageId, status])
+  @@index([status])
+  @@index([scheduledDate])
+  @@map("bookings")
+}
+
+model BookingStatusHistory {
+  id              String         @id @default(uuid()) @db.Uuid
+  bookingId       String         @map("booking_id") @db.Uuid
+  oldStatus       BookingStatus? @map("old_status")
+  newStatus       BookingStatus  @map("new_status")
+  /// Null = system-generated (e.g. initial REQUESTED row).
+  changedByUserId String?        @map("changed_by_user_id") @db.Uuid
+  actor           StatusActor    @default(SYSTEM)
+  reason          String?
+  createdAt       DateTime       @default(now()) @map("created_at")
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId, createdAt])
+  @@map("booking_status_history")
+}
+
+model AuditLog {
+  id           String   @id @default(uuid()) @db.Uuid
+  garageId     String?  @map("garage_id") @db.Uuid
+  actorId      String?  @map("actor_id") @db.Uuid
+  action       String   @db.VarChar(60)
+  resourceType String?  @map("resource_type") @db.VarChar(40)
+  resourceId   String?  @map("resource_id") @db.VarChar(64)
+  requestId    String?  @map("request_id") @db.VarChar(64)
+  ipAddress    String?  @map("ip_address") @db.VarChar(45)
+  userAgent    String?  @map("user_agent") @db.VarChar(255)
+  /// Sanitized context — never credentials or tokens (§37).
+  metadata     Json?
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([actorId, createdAt])
+  @@index([resourceType, resourceId])
+  @@index([garageId, createdAt])
+  @@map("audit_logs")
+}
+
+// ---------------- Auth (Phase 3) ----------------
+
+enum MfaFactorType {
+  TOTP
+}
+
+model RefreshSession {
+  id               String    @id @default(uuid()) @db.Uuid
+  userId           String    @map("user_id") @db.Uuid
+  /// sha256 of the opaque token — unique so rotation lookups and the
+  /// single-active-row invariant are enforced by the database itself.
+  refreshTokenHash String    @unique @map("refresh_token_hash") @db.VarChar(64)
+  deviceLabel      String?   @map("device_label") @db.VarChar(120)
+  ip               String?   @db.VarChar(45)
+  userAgent        String?   @map("user_agent") @db.VarChar(255)
+  expiresAt        DateTime  @map("expires_at")
+  revokedAt        DateTime? @map("revoked_at")
+  revokedReason    String?   @map("revoked_reason") @db.VarChar(40)
+  rotatedFromId    String?   @map("rotated_from_id") @db.Uuid
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([refreshTokenHash])
+  @@map("refresh_sessions")
+}
+
+model LoginAttempt {
+  id         String   @id @default(uuid()) @db.Uuid
+  identifier String   @db.VarChar(255)
+  userId     String?  @map("user_id") @db.Uuid
+  success    Boolean
+  ip         String?  @db.VarChar(45)
+  userAgent  String?  @map("user_agent") @db.VarChar(255)
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([identifier, createdAt])
+  @@index([ip, createdAt])
+  @@map("login_attempts")
+}
+
+model MfaFactor {
+  id              String        @id @default(uuid()) @db.Uuid
+  userId          String        @map("user_id") @db.Uuid
+  type            MfaFactorType @default(TOTP)
+  secretEncrypted String        @map("secret_encrypted")
+  confirmedAt     DateTime?     @map("confirmed_at")
+  lastUsedAt      DateTime?     @map("last_used_at")
+  disabledAt      DateTime?     @map("disabled_at")
+  createdAt       DateTime      @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("mfa_factors")
+}
+
+// ---------------- Work orders (Phase 5A — the job card) ----------------
+
+/// Execution records spawned at check-in. Bookings stay the acquisition
+/// record; the work order is the single source of truth for the visit.
+enum WorkOrderType {
+  REPAIR
+  SERVICE
+  DIAGNOSTIC
+  WASH
+  DETAILING
+  INSPECTION_ONLY
+}
+
+enum WorkOrderStatus {
+  PENDING
+  CHECKED_IN
+  INSPECTION
+  AWAITING_APPROVAL
+  APPROVED
+  IN_PROGRESS
+  WAITING_PARTS
+  TESTING
+  QUALITY_CHECK
+  READY_FOR_COLLECTION
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum WorkOrderPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum SecurityEventType {
+  FAILED_LOGIN
+  ACCOUNT_LOCKOUT
+  SUSPICIOUS_ACCESS
+  INVALID_TOKEN
+  RATE_LIMIT_EXCEEDED
+  UNAUTHORIZED_RESOURCE_ACCESS
+  MULTIPLE_FAILED_PAYMENT_ATTEMPTS
+}
+
+model SecurityEvent {
+  id        String            @id @default(uuid()) @db.Uuid
+  garageId  String?           @map("garage_id") @db.Uuid
+  userId    String?           @map("user_id") @db.Uuid
+  eventType SecurityEventType @map("event_type")
+  resource  String?           @db.VarChar(120)
+  ip        String?           @db.VarChar(45)
+  userAgent String?           @map("user_agent") @db.VarChar(255)
+  metadata  Json?
+  createdAt DateTime          @default(now()) @map("created_at")
+
+  @@index([eventType, createdAt])
+  @@index([userId, createdAt])
+  @@map("security_events")
+}
+
+// ---------------- Work orders (Phase 5A) ----------------
+
+/// The job card — spawned when a booking is checked in. One vehicle visit =
+/// one work order; inspections, findings, estimates, parts, QC, photos and
+/// the invoice all reference this record (docs/platform-roadmap-v2.md §4).
+model WorkOrder {
+  id                   String            @id @default(uuid()) @db.Uuid
+  garageId             String            @map("garage_id") @db.Uuid
+  bookingId            String            @unique @map("booking_id") @db.Uuid
+  customerId           String            @map("customer_id") @db.Uuid
+  /// Linked vehicle when one exists; guests check in with free text only.
+  vehicleId            String?           @map("vehicle_id") @db.Uuid
+  /// Snapshot of the booking's free-text vehicle description.
+  vehicleText          String?           @map("vehicle_text") @db.VarChar(120)
+  /// Human reference, e.g. WO-2026-000456 (unique per database).
+  woNumber             String            @unique @map("wo_number") @db.VarChar(24)
+  type                 WorkOrderType     @default(REPAIR)
+  status               WorkOrderStatus   @default(CHECKED_IN)
+  priority             WorkOrderPriority @default(NORMAL)
+  /// The customer's original words (kept verbatim, distinct from diagnosis).
+  complaint            String?
+  /// Technician's short technical summary (distinct from the complaint).
+  diagnosis            String?
+  assignedTechnicianId String?           @map("assigned_technician_id") @db.Uuid
+  /// Physical bay for the live workshop board (e.g. "Bay 3", "Wash Bay 1").
+  bayLabel             String?           @map("bay_label") @db.VarChar(40)
+  mileageIn            Int?              @map("mileage_in")
+  startedAt            DateTime?         @map("started_at")
+  completedAt          DateTime?         @map("completed_at")
+  createdAt            DateTime          @default(now()) @map("created_at")
+  updatedAt            DateTime          @updatedAt @map("updated_at")
+
+  garage     Garage   @relation(fields: [garageId], references: [id])
+  booking    Booking  @relation(fields: [bookingId], references: [id])
+  customer   User     @relation("WorkOrderCustomer", fields: [customerId], references: [id])
+  vehicle    Vehicle? @relation(fields: [vehicleId], references: [id])
+  technician User?    @relation("WorkOrderTechnician", fields: [assignedTechnicianId], references: [id])
+
+  statusHistory WorkOrderStatusHistory[]
+  inspectionRun InspectionRun?
+  inspectionFindings InspectionFinding[]
+  estimates     Estimate[]
+  partRequests  PartRequest[]
+  qualityChecks QualityCheck[]
+  invoice       Invoice?
+  washJob       WashJob?
+  notifications         Notification[]
+  customerUpdateTargets CustomerUpdate[] @relation("CustomerUpdateTargetWorkOrder")
+
+  @@index([garageId, status])
+  @@index([assignedTechnicianId, status])
+  @@index([status, priority])
+  @@index([customerId])
+  @@index([vehicleId])
+  @@map("work_orders")
+}
+
+/// Status changes with real actor identity (Phase 3 JWT → changedByUserId).
+model WorkOrderStatusHistory {
+  id              String           @id @default(uuid()) @db.Uuid
+  workOrderId     String           @map("work_order_id") @db.Uuid
+  oldStatus       WorkOrderStatus? @map("old_status")
+  newStatus       WorkOrderStatus  @map("new_status")
+  changedByUserId String?          @map("changed_by_user_id") @db.Uuid
+  actor           StatusActor      @default(SYSTEM)
+  reason          String?
+  createdAt       DateTime         @default(now()) @map("created_at")
+
+  workOrder WorkOrder @relation(fields: [workOrderId], references: [id], onDelete: Cascade)
+
+  @@index([workOrderId, createdAt])
+  @@map("work_order_status_history")
+}
+
+// ---------------- Inspections (Phase 5B — digital vehicle inspection) ----------------
+
+enum ResultStatus {
+  GOOD
+  WATCH
+  NEEDS_ATTENTION
+  CRITICAL
+  NOT_CHECKED
+}
+
+enum FindingStatus {
+  OPEN
+  PROPOSED
+  SENT
+  APPROVED
+  DECLINED
+  DEFERRED
+}
+
+enum FindingSeverity {
+  OK
+  WATCH
+  ATTENTION
+  CRITICAL
+}
+
+enum MediaStatus {
+  PENDING
+  READY
+  FAILED
+}
+
+/// Definition rows for the checklist (garage-owned, versioned snapshot at run time).
+model InspectionTemplate {
+  id          String   @id @default(uuid()) @db.Uuid
+  garageId    String   @map("garage_id") @db.Uuid
+  name        String   @db.VarChar(120)
+  /// Bumped on every item edit; runs snapshot itemIds so historical runs
+  /// stay stable when the template evolves.
+  version     Int      @default(1)
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  garage Garage             @relation(fields: [garageId], references: [id])
+  items  InspectionItem[]
+  runs   InspectionRun[]
+
+  @@index([garageId, isActive])
+  @@map("inspection_templates")
+}
+
+/// One checklist point ("Front brake pads"). Seeded ~33 items across 8 sections.
+model InspectionItem {
+  id             String   @id @default(uuid()) @db.Uuid
+  templateId     String   @map("template_id") @db.Uuid
+  section        String   @db.VarChar(40) // Exterior | Tyres | Brakes | Engine | Electrical | Suspension | Interior | Diagnostics
+  label          String   @db.VarChar(120)
+  displayOrder   Int      @default(0) @map("display_order")
+  /// mm | PSI | V | % | null — enables the measurement field in the UI.
+  measurementUnit String? @map("measurement_unit") @db.VarChar(12)
+  allowPhoto     Boolean  @default(true) @map("allow_photo")
+  /// Severity to auto-assign when a result with this status is recorded.
+  watchSeverity       FindingSeverity? @map("watch_severity")
+  needsAttentionSeverity FindingSeverity? @map("needs_attention_severity")
+  criticalSeverity    FindingSeverity? @map("critical_severity")
+
+  template InspectionTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  results  InspectionResult[]
+
+  @@index([templateId, displayOrder])
+  @@map("inspection_items")
+}
+
+/// One inspection attempt on a work order (mechanic starts → fills → submits).
+model InspectionRun {
+  id              String        @id @default(uuid()) @db.Uuid
+  garageId        String        @map("garage_id") @db.Uuid
+  workOrderId     String        @unique @map("work_order_id") @db.Uuid
+  templateId      String        @map("template_id") @db.Uuid
+  templateVersion Int           @map("template_version")
+  /// Who started/conducted the inspection (JWT actor).
+  conductedById   String?       @map("conducted_by_id") @db.Uuid
+  status          ResultStatus? @map("status") // unused placeholder, kept nullable scalar
+  completedAt     DateTime?     @map("completed_at")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+
+  workOrder    WorkOrder          @relation(fields: [workOrderId], references: [id])
+  template     InspectionTemplate @relation(fields: [templateId], references: [id])
+  conductor    User?              @relation("InspectionConductor", fields: [conductedById], references: [id])
+  results      InspectionResult[]
+  findings     InspectionFinding[]
+
+  @@index([garageId, workOrderId])
+  @@map("inspection_runs")
+}
+
+/// What the mechanic physically recorded — the idempotent upsert target.
+/// Client-generated id makes offline replays safe (roadmap §2.4).
+model InspectionResult {
+  id           String       @id @default(uuid()) @db.Uuid
+  runId        String       @map("run_id") @db.Uuid
+  itemId       String       @map("item_id") @db.Uuid
+  status       ResultStatus
+  measurement  Decimal?     @db.Decimal(10, 2)
+  /// Client-captured unit (defaults from item.measurementUnit).
+  unit         String?      @db.VarChar(12)
+  note         String?      @db.VarChar(500)
+  /// Attached photo (uploaded via presigned PUT; metadata set READY after).
+  photoMediaId String?      @map("photo_media_id") @db.Uuid
+  recordedById String?      @map("recorded_by_id") @db.Uuid
+  createdAt    DateTime     @default(now()) @map("created_at")
+  updatedAt    DateTime     @updatedAt @map("updated_at")
+
+  run    InspectionRun  @relation(fields: [runId], references: [id], onDelete: Cascade)
+  item   InspectionItem @relation(fields: [itemId], references: [id])
+  photo  MediaFile?     @relation(fields: [photoMediaId], references: [id])
+  findingsAsSource InspectionFinding[]
+
+  @@unique([runId, itemId])
+  @@index([runId])
+  @@map("inspection_results")
+}
+
+/// Customer-facing issue promoted from a result (or standalone) by staff.
+model InspectionFinding {
+  id                  String         @id @default(uuid()) @db.Uuid
+  garageId            String         @map("garage_id") @db.Uuid
+  workOrderId         String         @map("work_order_id") @db.Uuid
+  runId               String?        @map("run_id") @db.Uuid
+  resultId            String?        @map("result_id") @db.Uuid
+  /// Technical title (mechanic's words).
+  title               String         @db.VarChar(140)
+  /// Customer-friendly title (advisor's words).
+  customerTitle       String?        @map("customer_title") @db.VarChar(140)
+  customerExplanation String?        @map("customer_explanation") @db.VarChar(1000)
+  severity            FindingSeverity @default(ATTENTION)
+  customerVisible     Boolean        @default(false) @map("customer_visible")
+  status              FindingStatus  @default(OPEN)
+  /// Set when DECLINED/DEFERRED — feeds the reminders engine (roadmap §27.5).
+  followUpAt          DateTime?      @map("follow_up_at")
+  declineReason       String?        @map("decline_reason") @db.VarChar(40)
+  /// Recommended action, e.g. "Replace front brake pads".
+  recommendation      String?        @db.VarChar(300)
+  createdById         String?        @map("created_by_id") @db.Uuid
+  decidedById         String?        @map("decided_by_id") @db.Uuid
+  createdAt           DateTime       @default(now()) @map("created_at")
+  updatedAt           DateTime       @updatedAt @map("updated_at")
+
+  workOrder WorkOrder        @relation(fields: [workOrderId], references: [id])
+  run       InspectionRun?   @relation(fields: [runId], references: [id])
+  result    InspectionResult? @relation(fields: [resultId], references: [id])
+  estimateItems EstimateItem[]
+
+  @@index([workOrderId, status])
+  @@index([garageId, status])
+  @@map("inspection_findings")
+}
+
+// ---------------- Estimates & approvals (Phase 5C) ----------------
+
+/// Lifecycle of a priced quote for a work order: DRAFT → SENT →
+/// APPROVED/DECLINED/EXPIRED. Totals are server-computed (never trusted
+/// from the client); expiry is stamped when expired estimates are read.
+enum EstimateStatus {
+  DRAFT
+  SENT
+  APPROVED
+  DECLINED
+  EXPIRED
+}
+
+/// A priced line on an estimate — parts and labour alike, traceable to
+/// the inspection finding that motivated it (roadmap §4). Money = integer
+/// KES cents; qty is thousandths (allows 0.5 h labour without floats).
+enum EstimateItemKind {
+  PART
+  LABOUR
+}
+
+model Estimate {
+  id            String         @id @default(uuid()) @db.Uuid
+  garageId      String         @map("garage_id") @db.Uuid
+  workOrderId   String         @unique @map("work_order_id") @db.Uuid
+  /// Human reference, e.g. EST-2026-000789 (unique per database).
+  estimateNumber String        @unique @map("estimate_number") @db.VarChar(24)
+  status        EstimateStatus @default(DRAFT)
+  /// Server-computed at create and on revision (integer KES cents).
+  subtotalCents Int            @default(0) @map("subtotal_cents")
+  vatCents      Int            @default(0) @map("vat_cents")
+  totalCents    Int            @default(0) @map("total_cents")
+  /// When the estimate lapses (read-time stamp to EXPIRED).
+  expiresAt     DateTime?      @map("expires_at") @db.Timestamptz(6)
+  sentById      String?        @map("sent_by_id") @db.Uuid
+  sentAt        DateTime?      @map("sent_at") @db.Timestamptz(6)
+  decidedAt     DateTime?      @map("decided_at") @db.Timestamptz(6)
+  createdAt     DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  workOrder WorkOrder @relation(fields: [workOrderId], references: [id])
+  sender    User?     @relation("EstimateSender", fields: [sentById], references: [id])
+  notifications Notification[]
+
+  items     EstimateItem[]
+  approvals EstimateApproval[]
+
+  @@index([garageId, status])
+  @@index([workOrderId])
+  @@map("estimates")
+}
+
+model EstimateItem {
+  id          String          @id @default(uuid()) @db.Uuid
+  estimateId  String          @map("estimate_id") @db.Uuid
+  /// One-way traceability to the inspection finding that motivated the line.
+  findingId   String?         @map("finding_id") @db.Uuid
+  /// Catalog part this line prices (5E invoicing dedupes issued units
+  /// against priced lines PER PART via this link).
+  partId      String?         @map("part_id") @db.Uuid
+  kind        EstimateItemKind @default(LABOUR)
+  description String          @db.VarChar(300)
+  /// Thousandths of a unit (parts count or hours) — avoids float drift.
+  qtyMilli    Int             @default(1000) @map("qty_milli")
+  /// Integer KES cents per unit (per part / per hour).
+  unitPriceCents Int          @map("unit_price_cents")
+  /// Server-computed: round(qtyMilli * unitPriceCents / 1000).
+  lineTotalCents Int          @map("line_total_cents")
+  createdAt   DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  estimate Estimate           @relation(fields: [estimateId], references: [id], onDelete: Cascade)
+  finding  InspectionFinding? @relation(fields: [findingId], references: [id])
+  part     Part?              @relation(fields: [partId], references: [id])
+
+  @@index([estimateId])
+  @@index([findingId])
+  @@index([partId])
+  @@map("estimate_items")
+}
+
+enum EstimateApprovalAction {
+  SENT
+  VIEWED
+  APPROVED
+  DECLINED
+  REVISED
+  RE_APPROVED
+}
+
+enum EstimateActorType {
+  CUSTOMER
+  STAFF
+}
+
+enum EstimateDeclineReason {
+  TOO_EXPENSIVE
+  LATER
+  NEED_INFO
+  OTHER
+}
+
+/// Append-only approval ledger (roadmap §4): every SENT/VIEWED/APPROVED/
+/// DECLINED/REVISED/RE_APPROVED is a new row, never updated or deleted —
+/// the full history is a permanent, auditable record.
+model EstimateApproval {
+  id            String                 @id @default(uuid()) @db.Uuid
+  estimateId    String                 @map("estimate_id") @db.Uuid
+  action        EstimateApprovalAction
+  /// NULL = system-generated (e.g. auto-SENT row on send).
+  actorId       String?                @map("actor_id") @db.Uuid
+  actorType     EstimateActorType      @default(STAFF) @map("actor_type")
+  declineReason EstimateDeclineReason? @map("decline_reason")
+  note          String?                @db.VarChar(500)
+  /// True when the customer proved the OTP challenge issued at send.
+  otpVerified   Boolean                @default(false) @map("otp_verified")
+  /// Off-OTP provenance for STAFF rows, e.g. "phone_in" recorded by advisor.
+  via           String?                @db.VarChar(40)
+  createdAt     DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  estimate Estimate @relation(fields: [estimateId], references: [id], onDelete: Cascade)
+
+  @@index([estimateId, createdAt])
+  @@index([action])
+  @@map("estimate_approvals")
+}
+
+/// One-time codes for phone-first guest identity (roadmap §10.1): each row
+/// is a challenge issued by /auth/otp/request and consumed by /auth/otp/verify.
+/// Only sha256 hashes are stored; failures are capped per challenge.
+enum OtpPurpose {
+  ESTIMATE_APPROVAL
+}
+
+enum OtpStatus {
+  PENDING
+  VERIFIED
+  EXPIRED
+  MAXED_OUT
+}
+
+model OtpCode {
+  id         String    @id @default(uuid()) @db.Uuid
+  phone      String    @db.VarChar(20)
+  codeHash   String    @map("code_hash") @db.VarChar(64)
+  purpose    OtpPurpose @default(ESTIMATE_APPROVAL)
+  status     OtpStatus @default(PENDING)
+  estimateId String?   @map("estimate_id") @db.Uuid
+  attempts   Int       @default(0)
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(6)
+  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([phone, purpose, status])
+  @@index([estimateId])
+  @@map("otp_codes")
+}
+
+// ---------------- Media (Phase 5B — pulled forward from old Phase 9) ----------------
+
+/// Photo/video metadata. Object bytes live in S3/MinIO; rows are PENDING
+/// until the client confirms the presigned PUT succeeded.
+model MediaFile {
+  id          String      @id @default(uuid()) @db.Uuid
+  garageId    String      @map("garage_id") @db.Uuid
+  workOrderId String?     @map("work_order_id") @db.Uuid
+  /// WORK_ORDER_PHOTO | CHECKIN_PHOTO | RESULT_PHOTO … (open set, VarChar).
+  tag         String?     @db.VarChar(40)
+  entityType  String      @map("entity_type") @db.VarChar(40)
+  entityId    String      @map("entity_id") @db.Uuid
+  uploadedById String?    @map("uploaded_by_id") @db.Uuid
+  filename    String      @db.VarChar(255)
+  mimeType    String      @map("mime_type") @db.VarChar(80)
+  sizeBytes   Int         @map("size_bytes")
+  /// S3 object key (garageId/entityId/filename-ish, generated server-side).
+  objectKey   String      @unique @map("object_key") @db.VarChar(320)
+  status      MediaStatus @default(PENDING)
+  createdAt   DateTime    @default(now()) @map("created_at")
+  updatedAt   DateTime    @updatedAt @map("updated_at")
+
+  garage      Garage      @relation(fields: [garageId], references: [id])
+  results   InspectionResult[]
+  customerUpdates CustomerUpdate[]
+  // (no direct relation — media is referenced by result.photoMediaId)
+
+  @@index([entityType, entityId])
+  @@index([garageId, status])
+  @@map("media_files")
+}
+
+// ---------------- Parts & inventory (Phase 5D) ----------------
+
+/// Lifecycle of a mechanic's ask for a part on a job card: REQUESTED until
+/// the storekeeper ISSUES it from stock (or it is ORDERED / CANCELLED).
+enum PartRequestStatus {
+  REQUESTED
+  ISSUED
+  ORDERED
+  CANCELLED
+}
+
+/// Stock movement reason (docs/database.md §2.13). Every stock change —
+/// purchase, repair usage, return, manual adjustment — writes exactly one
+/// row of this type in the same DB transaction as the quantity update.
+enum InventoryTxType {
+  PURCHASE
+  SALE
+  REPAIR_USAGE
+  RETURN
+  ADJUSTMENT
+  DAMAGE
+  TRANSFER
+}
+
+/// A catalog part with on-hand stock. quantityOnHand is ONLY mutated
+/// through issuePart/adjustStock, which append the matching
+/// inventory_transactions row in the same transaction — the ledger is
+/// the audit trail and the number is derived from it.
+model Part {
+  id             String   @id @default(uuid()) @db.Uuid
+  garageId       String   @map("garage_id") @db.Uuid
+  /// SKU is unique per garage; humans read names ("Brake pad set — Fielder").
+  sku            String   @db.VarChar(60)
+  name           String   @db.VarChar(160)
+  manufacturer   String?  @db.VarChar(120)
+  partNumber     String?  @map("part_number") @db.VarChar(80)
+  description    String?  @db.VarChar(500)
+  /// Integer KES cents (money is never a float).
+  unitCostCents     Int   @default(0) @map("unit_cost_cents")
+  sellingPriceCents Int   @default(0) @map("selling_price_cents")
+  /// CHECK (quantity_on_hand >= 0) — enforced in SQL + service layer.
+  quantityOnHand Int      @default(0) @map("quantity_on_hand")
+  reorderLevel   Int      @default(0) @map("reorder_level")
+  isActive       Boolean  @default(true) @map("is_active")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  garage      Garage                 @relation(fields: [garageId], references: [id])
+  transactions InventoryTransaction[]
+  requests    PartRequest[]
+  estimateItems EstimateItem[]
+
+  @@unique([garageId, sku])
+  @@index([garageId, isActive])
+  @@map("parts")
+}
+
+/// Append-only stock ledger (docs/database.md §2.13): signed delta plus a
+/// post-state snapshot, written in the same DB transaction as the parts
+/// update it explains. quantityAfter makes reconciliation O(1).
+model InventoryTransaction {
+  id             String          @id @default(uuid()) @db.Uuid
+  garageId       String          @map("garage_id") @db.Uuid
+  partId         String          @map("part_id") @db.Uuid
+  /// Supplier kept for PURCHASE rows (Phase 5D scope: nullable, free text).
+  supplierRef    String?         @map("supplier_ref") @db.VarChar(160)
+  transactionType InventoryTxType @map("transaction_type")
+  /// Signed: negative for usage/damage, positive for purchases/returns.
+  quantityDelta  Int             @map("quantity_delta")
+  /// Post-state snapshot after this movement applied.
+  quantityAfter  Int             @map("quantity_after")
+  /// Unit cost snapshot in KES cents (nullable for non-purchase movements).
+  unitCostCents  Int?            @map("unit_cost_cents")
+  /// Free-text link, e.g. the parts_requests id or a delivery note.
+  reference      String?         @db.VarChar(160)
+  performedById  String?         @map("performed_by_id") @db.Uuid
+  notes          String?         @db.VarChar(500)
+  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  garage    Garage @relation(fields: [garageId], references: [id])
+  part      Part   @relation(fields: [partId], references: [id])
+  performer User?  @relation("InventoryTxPerformer", fields: [performedById], references: [id])
+
+  @@index([partId])
+  @@index([garageId, createdAt])
+  @@map("inventory_transactions")
+}
+
+/// A mechanic's ask for a part against a work order (roadmap §4/§5 step 12).
+/// ISSUING is the only path that decrements stock: one DB transaction writes
+/// the inventory row and attaches the part usage to the job card.
+model PartRequest {
+  id            String           @id @default(uuid()) @db.Uuid
+  garageId      String           @map("garage_id") @db.Uuid
+  workOrderId   String           @map("work_order_id") @db.Uuid
+  partId        String           @map("part_id") @db.Uuid
+  /// Whole units only — parts are counted, not poured (unlike estimate qty).
+  quantity      Int
+  status        PartRequestStatus @default(REQUESTED)
+  /// Snapshot at request time so the storekeeper sees the ask's intent.
+  note          String?          @db.VarChar(300)
+  /// Set on issue: KES cents per unit actually charged to the job.
+  unitPriceAtIssueCents Int?     @map("unit_price_at_issue_cents")
+  requestedById String           @map("requested_by_id") @db.Uuid
+  decidedById   String?          @map("decided_by_id") @db.Uuid
+  decidedAt     DateTime?        @map("decided_at") @db.Timestamptz(6)
+  createdAt     DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  garage    Garage         @relation(fields: [garageId], references: [id])
+  workOrder WorkOrder      @relation(fields: [workOrderId], references: [id])
+  part      Part           @relation(fields: [partId], references: [id])
+  requester User           @relation("PartRequester", fields: [requestedById], references: [id])
+  decider   User?          @relation("PartRequestDecider", fields: [decidedById], references: [id])
+
+  @@index([workOrderId, status])
+  @@index([partId])
+  @@index([garageId, status])
+  @@index([requestedById])
+  @@map("parts_requests")
+}
+
+// ---------------- Quality control (Phase 5E, roadmap §4) ----------------
+
+/// The fixed pre-collection checklist (docs/platform-roadmap-v2.md §4).
+/// Every boolean is a checkbox the QC-er must tick; a rejection is recorded
+/// as a new row (never an overwrite) so the QC history stays intact.
+model QualityCheck {
+  id               String   @id @default(uuid()) @db.Uuid
+  garageId         String   @map("garage_id") @db.Uuid
+  workOrderId      String   @map("work_order_id") @db.Uuid
+  repairCompleted  Boolean  @default(false) @map("repair_completed")
+  partsInstalled   Boolean  @default(false) @map("parts_installed")
+  noLeaks          Boolean  @default(false) @map("no_leaks")
+  warningLights    Boolean  @default(false) @map("warning_lights")
+  testDrive        Boolean  @default(false) @map("test_drive")
+  toolsRemoved     Boolean  @default(false) @map("tools_removed")
+  vehicleCleaned   Boolean  @default(false) @map("vehicle_cleaned")
+  belongingsChecked Boolean @default(false) @map("belongings_checked")
+  notes            String?  @db.VarChar(500)
+  /// null = pending review; the READY gate requires true on a RECENT row.
+  approved         Boolean?
+  /// Set when approved=false — what the mechanic must fix before re-QC.
+  rejectedReason   String?  @map("rejected_reason") @db.VarChar(300)
+  checkedById      String   @map("checked_by_id") @db.Uuid
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  garage    Garage    @relation(fields: [garageId], references: [id])
+  workOrder WorkOrder @relation(fields: [workOrderId], references: [id])
+  checker   User      @relation("QualityChecker", fields: [checkedById], references: [id])
+
+  @@index([workOrderId, createdAt])
+  @@index([garageId, approved])
+  @@map("quality_checks")
+}
+
+// ---------------- Invoicing & payments (Phase 5E) ----------------
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PARTIALLY_PAID
+  PAID
+  VOID
+  REFUNDED
+}
+
+enum InvoiceItemType {
+  SERVICE
+  PART
+  OTHER
+}
+
+enum PaymentMethod {
+  MPESA
+  CASH
+  CARD
+  BANK_TRANSFER
+  OTHER
+}
+
+enum PaymentStatus {
+  PENDING
+  INITIATED
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+  REVERSED
+  REFUNDED
+}
+
+enum PaymentEventType {
+  STK_CALLBACK
+  TIMEOUT
+  RECONCILIATION
+  MANUAL
+}
+
+enum MpesaRequestStatus {
+  SENT
+  CALLBACK_RECEIVED
+  TIMEOUT
+  FAILED
+}
+
+/// A work order's bill (docs/database.md §2.16). Totals are always
+/// backend-computed from item lines; corrections go through VOID —
+/// invoices are never edited after issue, never deleted.
+model Invoice {
+  id            String        @id @default(uuid()) @db.Uuid
+  garageId      String        @map("garage_id") @db.Uuid
+  /// The job being billed (v2: invoices are composed from work orders).
+  workOrderId   String        @unique @map("work_order_id") @db.Uuid
+  /// Kept for the original v1 contract (walk-ins); derived from the WO.
+  bookingId     String?       @map("booking_id") @db.Uuid
+  customerId    String        @map("customer_id") @db.Uuid
+  /// Human reference, e.g. INV-2026-000456 (invoice_number_seq).
+  invoiceNumber String        @unique @map("invoice_number") @db.VarChar(24)
+  status        InvoiceStatus @default(DRAFT)
+  subtotalCents Int           @default(0) @map("subtotal_cents")
+  discountCents Int           @default(0) @map("discount_cents")
+  taxCents      Int           @default(0) @map("tax_cents")
+  totalCents    Int           @default(0) @map("total_cents")
+  amountPaidCents Int         @default(0) @map("amount_paid_cents")
+  balanceDueCents Int         @default(0) @map("balance_due_cents")
+  currency      String        @default("KES") @db.VarChar(8)
+  issuedById    String?       @map("issued_by_id") @db.Uuid
+  issuedAt      DateTime?     @map("issued_at") @db.Timestamptz(6)
+  dueAt         DateTime?     @map("due_at") @db.Timestamptz(6)
+  voidedAt      DateTime?     @map("voided_at") @db.Timestamptz(6)
+  voidedById    String?       @map("voided_by_id") @db.Uuid
+  voidReason    String?       @map("void_reason") @db.VarChar(300)
+  createdAt     DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  garage    Garage         @relation(fields: [garageId], references: [id])
+  workOrder WorkOrder      @relation(fields: [workOrderId], references: [id])
+  booking   Booking?       @relation(fields: [bookingId], references: [id])
+  customer  User           @relation("InvoiceCustomer", fields: [customerId], references: [id])
+  issuer    User?          @relation("InvoiceIssuer", fields: [issuedById], references: [id])
+  voider    User?          @relation("InvoiceVoider", fields: [voidedById], references: [id])
+
+  items    InvoiceItem[]
+  payments Payment[]
+
+  @@index([customerId])
+  @@index([garageId, status])
+  @@map("invoices")
+}
+
+/// A priced line on an invoice — prices are SNAPSHOTS at composition time
+/// (docs/database.md §2.17). Money = integer KES cents; qty in thousandths
+/// (same convention as estimates, covers 0.5 h labour without floats).
+model InvoiceItem {
+  id             String          @id @default(uuid()) @db.Uuid
+  invoiceId      String          @map("invoice_id") @db.Uuid
+  itemType       InvoiceItemType @default(OTHER) @map("item_type")
+  description    String          @db.VarChar(300)
+  qtyMilli       Int             @default(1000) @map("qty_milli")
+  unitPriceCents Int             @map("unit_price_cents")
+  discountCents  Int             @default(0) @map("discount_cents")
+  taxCents       Int             @default(0) @map("tax_cents")
+  /// Server-computed: round(qtyMilli × unitPrice / 1000) − discount + tax.
+  totalCents     Int             @map("total_cents")
+  /// Lineage: priced service, stocked part, or the estimate line it came from.
+  serviceId      String?         @map("service_id") @db.Uuid
+  partId         String?         @map("part_id") @db.Uuid
+  estimateItemId String?         @map("estimate_item_id") @db.Uuid
+  createdAt      DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+  @@map("invoice_items")
+}
+
+/// Money in (docs/database.md §2.18). Corrections are NEW rows referencing
+/// the original via reversesPaymentId — a completed payment is never edited.
+model Payment {
+  id                    String        @id @default(uuid()) @db.Uuid
+  garageId              String        @map("garage_id") @db.Uuid
+  invoiceId             String        @map("invoice_id") @db.Uuid
+  customerId            String?       @map("customer_id") @db.Uuid
+  /// Positive integer KES cents.
+  amountCents           Int           @map("amount_cents")
+  currency              String        @default("KES") @db.VarChar(8)
+  method                PaymentMethod
+  status                PaymentStatus @default(PENDING)
+  /// 'DARAJA' for M-Pesa STK, 'MANUAL' for counter payments.
+  provider              String        @default("MANUAL") @db.VarChar(20)
+  /// Daraja CheckoutRequestID etc. (indexed via provider lookup).
+  providerTransactionId String?       @map("provider_transaction_id") @db.VarChar(100)
+  /// M-Pesa receipt code — unique where present (partial unique index).
+  mpesaReceipt          String?       @map("mpesa_receipt") @db.VarChar(40)
+  /// Paying MSISDN (E.164).
+  phoneNumber           String?       @map("phone_number") @db.VarChar(20)
+  /// UNIQUE — client outbox key or server-generated; blocks double-submit.
+  idempotencyKey        String        @unique @map("idempotency_key") @db.VarChar(80)
+  /// Reversal/refund rows point back at the payment they correct.
+  reversesPaymentId     String?       @map("reverses_payment_id") @db.Uuid
+  initiatedAt           DateTime?     @map("initiated_at") @db.Timestamptz(6)
+  completedAt           DateTime?     @map("completed_at") @db.Timestamptz(6)
+  failedAt              DateTime?     @map("failed_at") @db.Timestamptz(6)
+  createdAt             DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  garage   Garage        @relation(fields: [garageId], references: [id])
+  invoice  Invoice       @relation(fields: [invoiceId], references: [id])
+  customer User?         @relation("PaymentCustomer", fields: [customerId], references: [id])
+  reverses Payment?      @relation("PaymentCorrection", fields: [reversesPaymentId], references: [id])
+  correctedBy Payment[] @relation("PaymentCorrection")
+
+  events    PaymentEvent[]
+  mpesaRequests MpesaRequest[]
+
+  @@index([invoiceId])
+  @@index([providerTransactionId])
+  @@map("payments")
+}
+
+/// Provider callback audit (docs/database.md §2.19). payloadHash (sha256 of
+/// the raw body) + UNIQUE (provider, externalEventId) make duplicate
+/// callbacks rejectable with one lookup — no reprocessing, ever.
+model PaymentEvent {
+  id              String           @id @default(uuid()) @db.Uuid
+  paymentId       String?          @map("payment_id") @db.Uuid
+  provider        String           @db.VarChar(20)
+  eventType       PaymentEventType @map("event_type")
+  externalEventId String?          @map("external_event_id") @db.VarChar(100)
+  /// sha256 of the raw callback body — replay detection.
+  payloadHash     String           @map("payload_hash") @db.VarChar(64)
+  /// Sanitized parsed payload (no credentials, §62).
+  payloadMetadata Json?            @map("payload_metadata")
+  processed       Boolean          @default(false)
+  processedAt     DateTime?        @map("processed_at") @db.Timestamptz(6)
+  createdAt       DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  payment Payment? @relation(fields: [paymentId], references: [id])
+
+  @@unique([provider, externalEventId])
+  @@index([payloadHash])
+  @@map("payment_events")
+}
+
+/// Daraja STK push audit (docs/database.md §2.20). NEVER stores the
+/// passkey/consumer secret — those live in env only.
+model MpesaRequest {
+  id                String            @id @default(uuid()) @db.Uuid
+  paymentId         String?           @map("payment_id") @db.Uuid
+  phoneNumber       String            @map("phone_number") @db.VarChar(20)
+  amountCents       Int               @map("amount_cents")
+  merchantRequestId String?           @map("merchant_request_id") @db.VarChar(100)
+  checkoutRequestId String?           @map("checkout_request_id") @db.VarChar(100)
+  status            MpesaRequestStatus @default(SENT)
+  resultCode        Int?              @map("result_code")
+  resultDesc        String?           @map("result_desc") @db.VarChar(300)
+  createdAt         DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  payment Payment? @relation(fields: [paymentId], references: [id])
+
+  @@index([checkoutRequestId])
+  @@map("mpesa_requests")
+}
+
+// ---------------- Car wash (Phase 6 — §2.2 "not a separate system") ----------------
+
+enum WashStep {
+  QUEUED
+  WASHING
+  VACUUMING
+  DETAILING
+  QUALITY_CHECK
+  READY
+}
+
+/// The wash-specific step machine (docs/platform-roadmap-v2.md §2.2/§3):
+/// a wash is a WO with type=WASH plus this ONE row — package (category=WASH
+/// service), current step and the jsonb step audit trail. Kept separate
+/// from the workshop machine so the two never bleed into each other.
+model WashJob {
+  id             String    @id @default(uuid()) @db.Uuid
+  garageId       String    @map("garage_id") @db.Uuid
+  workOrderId    String    @unique @map("work_order_id") @db.Uuid
+  /// Package = the WASH-category service the booking resolved to.
+  serviceId      String    @map("service_id") @db.Uuid
+  /// The washer driving the five-button flow; null while QUEUED/unassigned.
+  washerId       String?   @map("washer_id") @db.Uuid
+  currentStep    WashStep  @default(QUEUED) @map("current_step")
+  /// Offline-safe step audit: {from,to,at,by,reason} rows, append-only.
+  stepHistory    Json      @default("[]") @map("step_history")
+  /// Client-generated UUID of the last applied step event (§86): an offline
+  /// washer's step POST replays idempotently against this key.
+  lastStepEventId String?  @unique @map("last_step_event_id") @db.Uuid
+  /// Sub-step notes (e.g. what the QC button observed), ≤500 chars.
+  notes          String?   @db.VarChar(500)
+  completedAt    DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  garage    Garage   @relation(fields: [garageId], references: [id])
+  workOrder WorkOrder @relation(fields: [workOrderId], references: [id])
+  service   Service  @relation(fields: [serviceId], references: [id])
+  washer    User?    @relation("WashJobWasher", fields: [washerId], references: [id])
+
+  @@index([garageId, currentStep])
+  @@index([washerId, currentStep])
+  @@map("wash_jobs")
+}
+
+// ---------------- Comms (Phase 7 — roadmap §8, §16–18) ----------------
+
+/// Delivery channels. IN_APP is live now (the row IS the inbox); PUSH/SMS/
+/// WHATSAPP/EMAIL record matrix intent (§8) until Phase 8 wires providers
+/// through notification_jobs (docs/database.md §2.25, BullMQ).
+enum NotificationChannel {
+  IN_APP
+  PUSH
+  SMS
+  WHATSAPP
+  EMAIL
+}
+
+/// State-event notifications (§8 defaults table). MANAGER_UPDATE is the
+/// fan-out row from a customer_updates broadcast (one writer, two triggers).
+enum NotificationType {
+  BOOKING_CONFIRMED
+  CHECKED_IN
+  ESTIMATE_READY
+  ESTIMATE_APPROVED
+  ESTIMATE_DECLINED
+  WORK_STARTED
+  WORK_COMPLETED
+  READY_FOR_COLLECTION
+  PAYMENT_RECEIPT
+  WASH_READY
+  MANAGER_UPDATE
+  SERVICE_REMINDER
+}
+
+enum NotificationStatus {
+  UNREAD
+  READ
+  DISMISSED
+}
+
+/// Manager broadcast audiences (roadmap §151/§16).
+enum UpdateAudience {
+  ALL_CUSTOMERS
+  SPECIFIC_CUSTOMER
+  SPECIFIC_VEHICLE
+  SPECIFIC_JOB
+  ALL_STAFF
+  MECHANICS
+  WASHERS
+}
+
+/// Maintenance nudge lifecycle: PENDING until due, DUE in the SA queue,
+/// SENT once the reminder notification fires, DISMISSED to archive.
+enum ReminderStatus {
+  PENDING
+  DUE
+  SENT
+  DISMISSED
+}
+
+enum ReminderKind {
+  MILEAGE
+  TIME
+}
+
+/// One row per recipient (§2.25 shape, dev scope). `channels` carries the
+/// channels-matrix decision made when the event fired. dedupeKey (client or
+/// server UUID) makes event replays collapse to one row.
+model Notification {
+  id          String             @id @default(uuid()) @db.Uuid
+  garageId    String             @map("garage_id") @db.Uuid
+  recipientId String             @map("recipient_id") @db.Uuid
+  type        NotificationType
+  title       String             @db.VarChar(160)
+  body        String             @db.VarChar(500)
+  /// {bookingNumber, woNumber, estimateNumber, invoiceNumber, vehicleText, sentBy}
+  data        Json?
+  /// Channels-matrix snapshot for this notification (§8 defaults).
+  channels    NotificationChannel[] @default([IN_APP])
+  /// The manager broadcast that fanned this row out (null = auto event).
+  customerUpdateId String?       @map("customer_update_id") @db.Uuid
+  status      NotificationStatus @default(UNREAD)
+  readAt      DateTime?          @map("read_at") @db.Timestamptz(6)
+  /// Unique — the same event (or offline replay) never duplicates a row.
+  dedupeKey   String             @unique @map("dedupe_key") @db.VarChar(120)
+  createdAt   DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  garage         Garage          @relation(fields: [garageId], references: [id])
+  recipient      User            @relation(fields: [recipientId], references: [id])
+  customerUpdate CustomerUpdate? @relation(fields: [customerUpdateId], references: [id])
+  booking        Booking?        @relation(fields: [bookingId], references: [id])
+  bookingId      String?         @map("booking_id") @db.Uuid
+  workOrder      WorkOrder?      @relation(fields: [workOrderId], references: [id])
+  workOrderId    String?         @map("work_order_id") @db.Uuid
+  estimate       Estimate?       @relation(fields: [estimateId], references: [id])
+  estimateId     String?         @map("estimate_id") @db.Uuid
+
+  @@index([recipientId, status, createdAt])
+  @@index([garageId, type, createdAt])
+  @@map("notifications")
+}
+
+/// Manager-created broadcast (roadmap §151/§16). The fan-out into one
+/// Notification row per recipient commits in the SAME transaction as this
+/// row — never a queue job that can silently die.
+model CustomerUpdate {
+  id          String         @id @default(uuid()) @db.Uuid
+  garageId    String         @map("garage_id") @db.Uuid
+  audience    UpdateAudience
+  title       String         @db.VarChar(160)
+  body        String         @db.VarChar(2000)
+  /// Optional media attachment (media_files, Phase 5B table).
+  attachmentMediaId String?  @map("attachment_media_id") @db.Uuid
+  /// Resolved targets for the SPECIFIC_* audiences.
+  targetCustomerId  String?  @map("target_customer_id") @db.Uuid
+  targetVehicleId   String?  @map("target_vehicle_id") @db.Uuid
+  targetWorkOrderId String?  @map("target_work_order_id") @db.Uuid
+  /// Fan-out snapshot: how many notification rows rode this broadcast.
+  recipientCount Int        @default(0) @map("recipient_count")
+  sentById    String         @map("sent_by_id") @db.Uuid
+  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  garage          Garage     @relation(fields: [garageId], references: [id])
+  sentBy          User       @relation("CustomerUpdateSender", fields: [sentById], references: [id])
+  attachmentMedia MediaFile? @relation(fields: [attachmentMediaId], references: [id])
+  targetCustomer  User?      @relation("CustomerUpdateTargetCustomer", fields: [targetCustomerId], references: [id])
+  targetVehicle   Vehicle?   @relation(fields: [targetVehicleId], references: [id])
+  targetWorkOrder WorkOrder? @relation("CustomerUpdateTargetWorkOrder", fields: [targetWorkOrderId], references: [id])
+  notifications   Notification[]
+
+  @@index([garageId, audience, createdAt])
+  @@map("customer_updates")
+}
+
+/// Maintenance nudge (roadmap §4/§18): vehicle passport reminders. PENDING
+/// until its due date/mileage arrives, DUE in the SA queue, SENT once the
+/// reminder notification goes out, DISMISSED to archive.
+model ServiceReminder {
+  id          String         @id @default(uuid()) @db.Uuid
+  garageId    String         @map("garage_id") @db.Uuid
+  vehicleId   String         @map("vehicle_id") @db.Uuid
+  kind        ReminderKind
+  dueMileage  Int?           @map("due_mileage")
+  dueDate     DateTime?      @map("due_date") @db.Date
+  /// Free-text label, e.g. "Oil service — 5,000 km".
+  title       String         @db.VarChar(160)
+  notes       String?        @db.VarChar(500)
+  status      ReminderStatus @default(PENDING)
+  /// Written when the reminder notification fires.
+  sentAt      DateTime?      @map("sent_at") @db.Timestamptz(6)
+  sentById    String?        @map("sent_by_id") @db.Uuid
+  createdById String         @map("created_by_id") @db.Uuid
+  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  garage    Garage  @relation(fields: [garageId], references: [id])
+  vehicle   Vehicle @relation(fields: [vehicleId], references: [id])
+  createdBy User    @relation("ServiceReminderCreator", fields: [createdById], references: [id])
+  sentBy    User?   @relation("ServiceReminderSender", fields: [sentById], references: [id])
+
+  @@index([garageId, status])
+  @@index([vehicleId, status])
+  @@map("service_reminders")
+}
+
+// ---------------- Forward declarations ----------------
+// The Booking model (with full columns per docs/database.md §2.7–2.8)
+// is added by the Phase 4 migration — not stubbed here.
+// User/Vehicle relation arrays for bookings (user.bookings, vehicle.bookings)
+// are likewise added in Phase 4 to keep this migration clean.
