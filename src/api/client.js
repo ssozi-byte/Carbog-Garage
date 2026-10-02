@@ -43,8 +43,7 @@ async function request(path, { method = 'GET', body, signal, timeout = DEFAULT_T
         status: res.status,
         requestId: err.requestId,
         details: err.details,
-      }
-      )
+      })
     }
 
     if (json && typeof json === 'object' && 'success' in json) {
@@ -56,7 +55,7 @@ async function request(path, { method = 'GET', body, signal, timeout = DEFAULT_T
     if (e?.name === 'AbortError') {
       throw new ApiError('TIMEOUT', 'Request timed out.', { status: 0 })
     }
-    // Network failure / backend down
+    // Network failure / backend down — don't log as error, just throw for graceful fallback
     throw new ApiError('NETWORK_ERROR', 'Backend unreachable.', { status: 0 })
   } finally {
     clearTimeout(timer)
